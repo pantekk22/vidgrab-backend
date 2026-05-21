@@ -1,41 +1,34 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 import yt_dlp
 import os
 import uuid
-import asyncio
-import shutil
 from pathlib import Path
 
 app = FastAPI(title="VidGrab API", version="1.0.0")
 
-# ── CORS: izinkan semua origin (sesuaikan domain frontend saat production)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-# ────────────────────────────────────────────
-# Models
-# ────────────────────────────────────────────
 class VideoInfoRequest(BaseModel):
     url: str
 
 class DownloadRequest(BaseModel):
     url: str
-    format: str   # "mp4" atau "mp3"
-    quality: str  # "1080p", "720p", "480p", "360p", "144p", "320kbps", "192kbps", "128kbps"
+    format: str
+    quality: str
 
-# ────────────────────────────────────────────
-# Helper: bersihkan file lama (>1 jam)
-# ────────────────────────────────────────────
 def cleanup_old_files():
     import time
     now = time.time()
@@ -43,16 +36,26 @@ def cleanup_old_files():
         if now - f.stat().st_mtime > 3600:
             f.unlink(missing_ok=True)
 
-# ────────────────────────────────────────────
-# Endpoint 1: GET /  — health check
-# ────────────────────────────────────────────
 @app.get("/")
 def root():
     return {"status": "ok", "message": "VidGrab API is running 🚀"}
 
-# ────────────────────────────────────────────
-# Endpoint 2: POST /info — ambil info video
-# ────────────────────────────────────────────
+@app.options("/info")
+def options_info():
+    return JSONResponse(content={}, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+    })
+
+@app.options("/download")
+def options_download():
+    return JSONResponse(content={}, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+    })
+
 @app.post("/info")
 def get_video_info(req: VideoInfoRequest):
     ydl_opts = {
@@ -64,7 +67,6 @@ def get_video_info(req: VideoInfoRequest):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.url, download=False)
 
-        # Kumpulkan format yang tersedia
         formats_available = []
         seen = set()
         for f in info.get("formats", []):
@@ -96,9 +98,6 @@ def get_video_info(req: VideoInfoRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ────────────────────────────────────────────
-# Endpoint 3: POST /download — download & kirim file
-# ────────────────────────────────────────────
 @app.post("/download")
 def download_video(req: DownloadRequest, background_tasks: BackgroundTasks):
     cleanup_old_files()
@@ -106,7 +105,6 @@ def download_video(req: DownloadRequest, background_tasks: BackgroundTasks):
     file_id = str(uuid.uuid4())
     output_path = DOWNLOAD_DIR / file_id
 
-    # Map kualitas ke format yt-dlp
     if req.format == "mp3":
         bitrate_map = {"320kbps": "320", "192kbps": "192", "128kbps": "128"}
         bitrate = bitrate_map.get(req.quality, "192")
@@ -122,7 +120,6 @@ def download_video(req: DownloadRequest, background_tasks: BackgroundTasks):
         }
         ext = "mp3"
     else:
-        # Map resolusi
         height_map = {
             "4K": "2160", "1080p": "1080", "720p": "720",
             "480p": "480", "360p": "360", "144p": "144"
@@ -141,7 +138,6 @@ def download_video(req: DownloadRequest, background_tasks: BackgroundTasks):
             info = ydl.extract_info(req.url, download=True)
             title = info.get("title", "video")
 
-        # Cari file hasil download
         downloaded = list(DOWNLOAD_DIR.glob(f"{file_id}.*"))
         if not downloaded:
             raise HTTPException(status_code=500, detail="File tidak ditemukan setelah download")
@@ -150,13 +146,16 @@ def download_video(req: DownloadRequest, background_tasks: BackgroundTasks):
         safe_title = "".join(c for c in title if c.isalnum() or c in " -_")[:60]
         filename = f"{safe_title}.{ext}"
 
-        # Hapus file setelah dikirim
         background_tasks.add_task(lambda p: p.unlink(missing_ok=True), file_path)
 
         return FileResponse(
             path=str(file_path),
             filename=filename,
             media_type="audio/mpeg" if ext == "mp3" else "video/mp4",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            }
         )
 
     except yt_dlp.utils.DownloadError as e:
