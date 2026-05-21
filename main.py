@@ -4,18 +4,19 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import yt_dlp
 import uuid
+import time
 from pathlib import Path
 
 app = FastAPI(title="VidGrab API", version="1.0.0")
 
-# CORS FIX UNTUK VERCEL + LOCALHOST
+# =========================
+# CORS FIX
+# =========================
+# Untuk testing/deploy awal, pakai "*" supaya semua domain Vercel bisa akses.
+# Pastikan allow_credentials=False kalau allow_origins=["*"].
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://vidgrab-frontend.vercel.app",
-        "http://localhost:5173",
-        "http://localhost:3000",
-    ],
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -37,7 +38,6 @@ class DownloadRequest(BaseModel):
 
 
 def cleanup_old_files():
-    import time
     now = time.time()
 
     for f in DOWNLOAD_DIR.iterdir():
@@ -70,8 +70,9 @@ def get_video_info(req: VideoInfoRequest):
 
         for f in info.get("formats", []):
             height = f.get("height")
+            vcodec = f.get("vcodec")
 
-            if height and f.get("vcodec") != "none":
+            if height and vcodec != "none":
                 label = f"{height}p"
 
                 if label not in seen:
@@ -101,7 +102,10 @@ def get_video_info(req: VideoInfoRequest):
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 
 @app.post("/download")
@@ -115,7 +119,7 @@ def download_video(req: DownloadRequest, background_tasks: BackgroundTasks):
         bitrate_map = {
             "320kbps": "320",
             "192kbps": "192",
-            "128kbps": "128"
+            "128kbps": "128",
         }
 
         bitrate = bitrate_map.get(req.quality, "192")
@@ -124,6 +128,7 @@ def download_video(req: DownloadRequest, background_tasks: BackgroundTasks):
             "format": "bestaudio/best",
             "outtmpl": str(output_path) + ".%(ext)s",
             "quiet": True,
+            "no_warnings": True,
             "postprocessors": [
                 {
                     "key": "FFmpegExtractAudio",
@@ -138,6 +143,7 @@ def download_video(req: DownloadRequest, background_tasks: BackgroundTasks):
     else:
         height_map = {
             "4K": "2160",
+            "2160p": "2160",
             "1080p": "1080",
             "720p": "720",
             "480p": "480",
@@ -148,9 +154,10 @@ def download_video(req: DownloadRequest, background_tasks: BackgroundTasks):
         height = height_map.get(req.quality, "1080")
 
         ydl_opts = {
-            "format": f"bestvideo[height<={height}]+bestaudio/best[height<={height}]",
+            "format": f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best[height<={height}]/best",
             "outtmpl": str(output_path) + ".%(ext)s",
             "quiet": True,
+            "no_warnings": True,
             "merge_output_format": "mp4",
         }
 
@@ -173,7 +180,10 @@ def download_video(req: DownloadRequest, background_tasks: BackgroundTasks):
 
         safe_title = "".join(
             c for c in title if c.isalnum() or c in " -_"
-        )[:60]
+        ).strip()[:60]
+
+        if not safe_title:
+            safe_title = "vidgrab"
 
         filename = f"{safe_title}.{ext}"
 
@@ -198,4 +208,7 @@ def download_video(req: DownloadRequest, background_tasks: BackgroundTasks):
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
